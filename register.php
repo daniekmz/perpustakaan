@@ -1,203 +1,207 @@
 <?php
+// Start the session to maintain login status
 session_start();
-require_once 'config.php';
 
-// Jika sudah login, redirect
-if (isset($_SESSION['user']) || isset($_SESSION['anggota'])) {
-    header("Location: index.php");
-    exit();
+// If user is already logged in, redirect to dashboard
+if(isset($_SESSION["loggedin"]) && $_SESSION["loggedin"] === true){
+    header("location: dashboard.php");
+    exit;
 }
 
-// Fungsi untuk generate nomor anggota
-function generateMemberNumber($conn) {
-    $year = date('Y');
+// Include database connection
+require_once "connection.php";
+
+// Define variables and initialize with empty values
+$nomor_anggota = $nama = $alamat = $telepon = $email = $password = $confirm_password = "";
+$nomor_anggota_err = $nama_err = $alamat_err = $telepon_err = $email_err = $password_err = $confirm_password_err = "";
+
+// Processing form data when form is submitted
+if($_SERVER["REQUEST_METHOD"] == "POST"){
     
-    // Cari nomor anggota terakhir dengan prefix tahun ini
-    $stmt = $conn->prepare("SELECT MAX(nomor_anggota) as last_number FROM anggota WHERE nomor_anggota LIKE :prefix");
-    $prefix = "LIB" . $year;
-    $stmt->bindParam(':prefix', $prefix . '%');
-    $stmt->execute();
-    $result = $stmt->fetch(PDO::FETCH_ASSOC);
+    // Validate nomor anggota (will be auto-generated)
+    $prefix = "LIB" . date("Y");
     
-    if ($result['last_number']) {
-        // Ekstrak nomor urut dan tambahkan 1
-        $last_number = (int)substr($result['last_number'], -3);
-        $new_number = $last_number + 1;
-    } else {
-        // Jika belum ada anggota dengan prefix tahun ini
-        $new_number = 1;
+    // Get the latest member number
+    $sql = "SELECT MAX(nomor_anggota) as max_id FROM Anggota WHERE nomor_anggota LIKE ?";
+    if($stmt = $conn->prepare($sql)){
+        $param_prefix = $prefix . "%";
+        $stmt->bind_param("s", $param_prefix);
+        
+        if($stmt->execute()){
+            $result = $stmt->get_result();
+            $row = $result->fetch_assoc();
+            $last_id = $row['max_id'];
+            
+            if($last_id){
+                $num = intval(substr($last_id, -3));
+                $num++;
+            } else {
+                $num = 1;
+            }
+            
+            $nomor_anggota = $prefix . str_pad($num, 3, "0", STR_PAD_LEFT);
+        } else {
+            echo "Oops! Something went wrong. Please try again later.";
+        }
+        
+        $stmt->close();
     }
     
-    // Format nomor urut dengan leading zeros
-    $formatted_number = sprintf("%03d", $new_number);
-    return $prefix . $formatted_number;
-}
-
-$errors = [];
-$success = false;
-
-if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    // Validasi input
-    $nama = trim($_POST['nama']);
-    $alamat = trim($_POST['alamat']);
-    $telepon = trim($_POST['telepon']);
-    $email = trim($_POST['email']);
-    $password = $_POST['password'];
-    $confirm_password = $_POST['confirm_password'];
-    
-    // Validasi nama
-    if (empty($nama)) {
-        $errors[] = "Nama tidak boleh kosong";
+    // Validate nama
+    if(empty(trim($_POST["nama"]))){
+        $nama_err = "Please enter your name.";
+    } else{
+        $nama = trim($_POST["nama"]);
     }
     
-    // Validasi email
-    if (empty($email)) {
-        $errors[] = "Email tidak boleh kosong";
-    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $errors[] = "Format email tidak valid";
-    } else {
-        // Cek apakah email sudah terdaftar
-        $stmt = $conn->prepare("SELECT COUNT(*) FROM anggota WHERE email = ?");
-        $stmt->execute([$email]);
-        if ($stmt->fetchColumn() > 0) {
-            $errors[] = "Email sudah terdaftar";
+    // Validate alamat
+    if(empty(trim($_POST["alamat"]))){
+        $alamat_err = "Please enter your address.";
+    } else{
+        $alamat = trim($_POST["alamat"]);
+    }
+    
+    // Validate telepon (optional)
+    $telepon = trim($_POST["telepon"]);
+    
+    // Validate email
+    if(empty(trim($_POST["email"]))){
+        $email_err = "Please enter your email.";
+    } else{
+        // Check if email exists
+        $sql = "SELECT anggota_id FROM Anggota WHERE email = ?";
+        
+        if($stmt = $conn->prepare($sql)){
+            $stmt->bind_param("s", $param_email);
+            $param_email = trim($_POST["email"]);
+            
+            if($stmt->execute()){
+                $stmt->store_result();
+                
+                if($stmt->num_rows > 0){
+                    $email_err = "This email is already taken.";
+                } else{
+                    $email = trim($_POST["email"]);
+                }
+            } else{
+                echo "Oops! Something went wrong. Please try again later.";
+            }
+            
+            $stmt->close();
         }
     }
     
-    // Validasi telepon
-    if (empty($telepon)) {
-        $errors[] = "Nomor telepon tidak boleh kosong";
-    } elseif (!preg_match('/^[0-9]{10,15}$/', $telepon)) {
-        $errors[] = "Format nomor telepon tidak valid";
+    // Validate password
+    if(empty(trim($_POST["password"]))){
+        $password_err = "Please enter a password.";     
+    } elseif(strlen(trim($_POST["password"])) < 6){
+        $password_err = "Password must have at least 6 characters.";
+    } else{
+        $password = trim($_POST["password"]);
     }
     
-    // Validasi alamat
-    if (empty($alamat)) {
-        $errors[] = "Alamat tidak boleh kosong";
-    }
-    
-    // Validasi password
-    if (empty($password)) {
-        $errors[] = "Password tidak boleh kosong";
-    } elseif (strlen($password) < 6) {
-        $errors[] = "Password minimal 6 karakter";
-    } elseif ($password !== $confirm_password) {
-        $errors[] = "Password tidak cocok";
-    }
-    
-    // Jika tidak ada error, proses pendaftaran
-    if (empty($errors)) {
-        try {
-            $conn->beginTransaction();
-            
-            // Generate nomor anggota
-            $nomor_anggota = generateMemberNumber($conn);
-            
-            // Hash password
-            $password_hash = password_hash($password, PASSWORD_DEFAULT);
-            
-            // Tanggal pendaftaran hari ini
-            $tanggal_daftar = date('Y-m-d');
-            
-            // Insert data anggota baru
-            $stmt = $conn->prepare("INSERT INTO anggota (nomor_anggota, nama, alamat, telepon, email, tanggal_daftar, password_hash) 
-                                   VALUES (?, ?, ?, ?, ?, ?, ?)");
-            $stmt->execute([$nomor_anggota, $nama, $alamat, $telepon, $email, $tanggal_daftar, $password_hash]);
-            
-            $conn->commit();
-            $success = true;
-            $nomor_anggota_baru = $nomor_anggota;
-            
-        } catch (PDOException $e) {
-            $conn->rollBack();
-            $errors[] = "Terjadi kesalahan sistem: " . $e->getMessage();
+    // Validate confirm password
+    if(empty(trim($_POST["confirm_password"]))){
+        $confirm_password_err = "Please confirm password.";     
+    } else{
+        $confirm_password = trim($_POST["confirm_password"]);
+        if(empty($password_err) && ($password != $confirm_password)){
+            $confirm_password_err = "Password did not match.";
         }
     }
+    
+    // Check input errors before inserting in database
+    if(empty($nama_err) && empty($alamat_err) && empty($email_err) && empty($password_err) && empty($confirm_password_err)){
+        
+        // Prepare an insert statement
+        $sql = "INSERT INTO Anggota (nomor_anggota, nama, alamat, telepon, email, tanggal_daftar, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?)";
+         
+        if($stmt = $conn->prepare($sql)){
+            // Bind variables to the prepared statement as parameters
+            $stmt->bind_param("sssssss", $param_nomor, $param_nama, $param_alamat, $param_telepon, $param_email, $param_tanggal, $param_password);
+            
+            // Set parameters
+            $param_nomor = $nomor_anggota;
+            $param_nama = $nama;
+            $param_alamat = $alamat;
+            $param_telepon = $telepon;
+            $param_email = $email;
+            $param_tanggal = date("Y-m-d");
+            $param_password = password_hash($password, PASSWORD_DEFAULT); // Creates a password hash
+            
+            // Attempt to execute the prepared statement
+            if($stmt->execute()){
+                // Redirect to login page
+                echo "<script>alert('Pendaftaran berhasil! Nomor anggota Anda adalah: " . $nomor_anggota . ". Harap catat nomor ini untuk keperluan login.');</script>";
+                echo "<script>window.location.href='login.php';</script>";
+            } else{
+                echo "Oops! Something went wrong. Please try again later.";
+            }
+            
+            // Close statement
+            $stmt->close();
+        }
+    }
+    
+    // Close connection
+    $conn->close();
 }
 ?>
 
 <!DOCTYPE html>
-<html>
+<html lang="id">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pendaftaran Anggota - Sistem Perpustakaan</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <!-- Add Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
-<body class="bg-light">
-    <div class="container py-5">
-        <div class="row justify-content-center">
-            <div class="col-md-8">
-                <div class="card shadow">
-                    <div class="card-body p-4">
-                        <h3 class="card-title text-center mb-4">Pendaftaran Anggota Perpustakaan</h3>
-                        
-                        <?php if ($success): ?>
-                            <div class="alert alert-success">
-                                <h4>Pendaftaran Berhasil!</h4>
-                                <p>Selamat! Anda telah terdaftar sebagai anggota perpustakaan dengan nomor anggota: <strong><?= htmlspecialchars($nomor_anggota_baru) ?></strong></p>
-                                <p>Silakan <a href="login.php" class="alert-link">login</a> menggunakan nomor anggota dan password yang telah Anda daftarkan.</p>
-                            </div>
-                        <?php else: ?>
-                            <?php if (!empty($errors)): ?>
-                                <div class="alert alert-danger">
-                                    <h5>Terdapat kesalahan:</h5>
-                                    <ul class="mb-0">
-                                        <?php foreach ($errors as $error): ?>
-                                            <li><?= $error ?></li>
-                                        <?php endforeach; ?>
-                                    </ul>
-                                </div>
-                            <?php endif; ?>
-                            
-                            <form method="POST">
-                                <div class="mb-3">
-                                    <label class="form-label">Nama Lengkap*</label>
-                                    <input type="text" class="form-control" name="nama" value="<?= isset($nama) ? htmlspecialchars($nama) : '' ?>" required>
-                                </div>
-                                
-                                <div class="mb-3">
-                                    <label class="form-label">Alamat*</label>
-                                    <textarea class="form-control" name="alamat" rows="2" required><?= isset($alamat) ? htmlspecialchars($alamat) : '' ?></textarea>
-                                </div>
-                                
-                                <div class="row mb-3">
-                                    <div class="col-md-6">
-                                        <label class="form-label">Nomor Telepon*</label>
-                                        <input type="tel" class="form-control" name="telepon" value="<?= isset($telepon) ? htmlspecialchars($telepon) : '' ?>" required>
-                                    </div>
-                                    <div class="col-md-6">
-                                        <label class="form-label">Email*</label>
-                                        <input type="email" class="form-control" name="email" value="<?= isset($email) ? htmlspecialchars($email) : '' ?>" required>
-                                    </div>
-                                </div>
-                                
-                                <div class="row mb-3">
-                                    <div class="col-md-6">
-                                        <label class="form-label">Password*</label>
-                                        <input type="password" class="form-control" name="password" required>
-                                        <div class="form-text">Minimal 6 karakter</div>
-                                    </div>
-                                    <div class="col-md-6">
-                                        <label class="form-label">Konfirmasi Password*</label>
-                                        <input type="password" class="form-control" name="confirm_password" required>
-                                    </div>
-                                </div>
-                                
-                                <div class="mb-3 form-text">
-                                    <small>* menandakan field wajib diisi</small>
-                                </div>
-                                
-                                <div class="d-grid gap-2">
-                                    <button type="submit" class="btn btn-primary">Daftar</button>
-                                    <a href="login.php" class="btn btn-outline-secondary">Sudah punya akun? Login</a>
-                                </div>
-                            </form>
-                        <?php endif; ?>
-                    </div>
+<body>
+    <?php include "header.php"; ?>
+    
+    <div class="container">
+        <div class="form-container">
+            <h2 class="form-title">Pendaftaran Anggota Perpustakaan</h2>
+            <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
+                <div class="form-group">
+                    <label>Nama Lengkap</label>
+                    <input type="text" name="nama" class="form-control <?php echo (!empty($nama_err)) ? 'is-invalid' : ''; ?>" value="<?php echo $nama; ?>">
+                    <span class="invalid-feedback"><?php echo $nama_err; ?></span>
                 </div>
-            </div>
+                <div class="form-group">
+                    <label>Alamat</label>
+                    <textarea name="alamat" class="form-control <?php echo (!empty($alamat_err)) ? 'is-invalid' : ''; ?>" rows="3"><?php echo $alamat; ?></textarea>
+                    <span class="invalid-feedback"><?php echo $alamat_err; ?></span>
+                </div>
+                <div class="form-group">
+                    <label>Nomor Telepon</label>
+                    <input type="text" name="telepon" class="form-control" value="<?php echo $telepon; ?>">
+                </div>
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" name="email" class="form-control <?php echo (!empty($email_err)) ? 'is-invalid' : ''; ?>" value="<?php echo $email; ?>">
+                    <span class="invalid-feedback"><?php echo $email_err; ?></span>
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" name="password" class="form-control <?php echo (!empty($password_err)) ? 'is-invalid' : ''; ?>" value="<?php echo $password; ?>">
+                    <span class="invalid-feedback"><?php echo $password_err; ?></span>
+                </div>
+                <div class="form-group">
+                    <label>Konfirmasi Password</label>
+                    <input type="password" name="confirm_password" class="form-control <?php echo (!empty($confirm_password_err)) ? 'is-invalid' : ''; ?>" value="<?php echo $confirm_password; ?>">
+                    <span class="invalid-feedback"><?php echo $confirm_password_err; ?></span>
+                </div>
+                <div class="form-group">
+                    <button type="submit" class="btn btn-block">Daftar</button>
+                </div>
+                <p class="text-center">Sudah punya akun? <a href="login.php">Login disini</a>.</p>
+            </form>
         </div>
     </div>
     
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <?php include "footer.php"; ?>
 </body>
 </html>
